@@ -1,0 +1,71 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  core:
+    name: Python core suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # Launcher/job-control tests need these; the RTC stack stays out.
+      # numpy is a runtime dependency of a few modules whose tests skip without it.
+      - name: Dependencies
+        run: python -m pip install httpx huggingface_hub numpy
+      # The pipeline shells out to ffmpeg/ffprobe; the suite assumes they exist.
+      - name: System tools
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      # The suite is split by dependency. This job runs the stdlib-only core;
+      # modules that import httpx, huggingface_hub, aiortc or av are not part of it.
+      - name: Unit tests
+        run: |
+          # The run itself reports the expected import errors; the check below decides.
+          python -m unittest discover -s tests -v > /tmp/tests.log 2>&1 || true
+          tail -3 /tmp/tests.log
+          # Only the dependency-split modules may fail, and only by failing to import.
+          # (A test whose module imported but then hit a missing dependency is not tolerated.)
+          # grep/awk are avoided: their ERE handling of a group followed by a space
+          # differs between BSD and GNU builds, so this is decided in Python.
+          python - <<'PY'
+          import re, sys
+          prefix = 'ERROR: test_h3_'
+          modules = ('asr_rtc', 'voxcpm_rtc', 'webrtc_exact_channel', 'webrtc_live_ipc_rtp',
+                     'webrtc_live_peer', 'webrtc_signal_server', 'webrtc_upstream_adapter')
+          bad = []
+          for line in open('/tmp/tests.log'):
+              if not line.startswith(('ERROR:', 'FAIL:')):
+                  continue
+              module = line[len(prefix):].split(' ', 1)[0] if line.startswith(prefix) else ''
+              tolerated = (line.startswith(prefix) and '(' not in module
+                           and module.split('_')[0] in ('asr', 'voxcpm', 'webrtc')
+                           and any(module.startswith(m) for m in modules)
+                           and 'unittest.loader._FailedTest' in line)
+              if not tolerated:
+                  bad.append(line)
+          if bad:
+              print(''.join(bad))
+              sys.exit(1)
+          PY
+          echo "core suite passed (dependency-split import errors ignored)"
+
+  director:
+    name: Director contract (Node)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Contract tests
+        run: |
+          for f in tests/*.mjs; do node --test "$f"; done

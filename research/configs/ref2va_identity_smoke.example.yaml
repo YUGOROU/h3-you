@@ -1,0 +1,77 @@
+# NOT a launch authorization. Requires composed source installer + verified v2 cache.
+# Only 3 updates to verify actual H3/PEFT/optimizer/checkpoint interfaces.
+# Guidance scale 4 and LR 1e-5 are provisional, not verified likeness settings.
+model:
+  model_path: ${H3_MODEL_PATH}
+  variant: ref2va
+  training_mode: lora
+  load_checkpoint: null
+lora:
+  rank: 16
+  alpha: 16
+  dropout: 0.0
+  target_modules: [to_q, to_k, to_v, to_out.0]
+training_strategy:
+  name: flexible
+  identity_guidance_scale: 4.0
+  identity_guidance_sigma_min: 0.15
+  video:
+    is_generated: true
+    latents_dir: latents
+    conditions:
+      - type: reference
+        modality: image
+        latents_dir: reference_latents
+        probability: 1.0
+  audio:
+    is_generated: false
+    latents_dir: audio_latents
+    conditions: []
+optimization:
+  learning_rate: 0.00001
+  steps: 3
+  batch_size: 1
+  gradient_accumulation_steps: 1
+  max_grad_norm: 1.0
+  optimizer_type: adamw
+  scheduler_type: constant
+  warmup_steps: 0
+  enable_gradient_checkpointing: true
+  max_seq_tokens: 70000
+acceleration:
+  strategy: ddp
+  mixed_precision_mode: bf16
+  quantization: none
+  offload_optimizer_during_validation: false
+data:
+  preprocessed_data_root: ${H3_CACHE_PATH}
+  num_dataloader_workers: 0
+  val_split_every: 0
+  shuffle: true
+validation:
+  samples: []
+  video_dims: [768, 1344, 124]
+  frame_rate: 24.0
+  seed: 42
+  inference_steps: 30
+  interval: 1000
+  sample_media: false
+  loss_sigmas: [0.3, 0.6, 0.9]
+  max_loss_samples: 2
+  skip_initial_validation: true
+checkpoints:
+  interval: 1
+  keep_last_n: 3
+  precision: bfloat16
+  save_training_state: full
+flow_matching:
+  timestep_sampling_mode: uniform
+  timestep_sampling_params: {}
+  video_shift: 12.0
+  audio_shift: 3.0
+hub:
+  push_to_hub: false
+wandb:
+  enabled: false
+seed: 42
+output_dir: ${H3_RUN_PATH}

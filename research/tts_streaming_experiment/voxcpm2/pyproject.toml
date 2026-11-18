@@ -1,0 +1,11 @@
+[project]
+name = "h3-voxcpm2-streaming-probe"
+version = "0.0.1"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+  "voxcpm @ https://github.com/OpenBMB/VoxCPM/archive/cce58a5b59303c9bd63d12f23afe6a49a4a80c59.tar.gz#sha256=a2b9d9f3076d9d6eaaf5fdb6b92e1bc7c3b4643bc9a489bace7622e04bcdbd2c",
+  "torch==2.8.0", "torchaudio==2.8.0", "torchcodec==0.7.0",
+  "transformers==5.15.0", "huggingface-hub==1.33.0",
+]
+[tool.uv]
+package = false

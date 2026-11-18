@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>local.h3.speech</string>
+<key>CFBundleName</key><string>H3 Local Speech</string>
+<key>CFBundleVersion</key><string>1</string>
+<key>NSSpeechRecognitionUsageDescription</key><string>Recognize your explicitly requested Japanese conversation locally. No cloud recognition fallback.</string>
+<key>NSMicrophoneUsageDescription</key><string>Listen to one requested 12-second utterance for H3 conversation. Audio is not saved.</string>
+</dict></plist>

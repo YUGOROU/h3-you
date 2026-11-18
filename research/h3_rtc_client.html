@@ -1,0 +1,67 @@
+<!doctype html><meta charset="utf-8"><title>H3 live RTC receiver</title>
+<style>body{background:#17191d;color:#eee;font:16px system-ui}video{height:75vh;background:#000}button{margin:8px;padding:10px}</style>
+<video id="media" muted playsinline></video><br>
+<button id="connect">接続・映像再生</button><button id="unmute">音声を有効にする</button><button id="stop">停止</button>
+<pre id="status">H264/Opus candidate. No microphone/camera capture. Receiver progress is not exact PCM or audibility proof.</pre>
+<script>
+'use strict';
+const video=document.querySelector('#media'),status=document.querySelector('#status');
+let cap=location.hash.slice(1);history.replaceState(null,'',location.pathname);
+let pc,ch,config,mediaBinding,life,drain,poll,closeTimer,started=false,stopped=false,ending=false,eos=false,frameEvent=false;
+let pending=[],next=0,frameTail=0,sampleTail=0,anchor=null,frames=0,samples=0,lastPresentedAt=performance.now();
+const stream=new MediaStream();video.srcObject=stream;
+async function api(path,value){const r=await fetch(path,{method:value===undefined?'GET':'POST',headers:{'X-H3-Capability':cap,'Content-Type':'application/json'},body:value===undefined?undefined:JSON.stringify(value),signal:AbortSignal.timeout(12000),cache:'no-store'});if(!r.ok)throw Error('signaling');return r.json();}
+function event(name){api('/event',{event:name}).catch(()=>{});}
+function send(value){if(ch?.readyState!=='open')return false;const raw=typeof value==='string'?value:JSON.stringify(value);if(new TextEncoder().encode(raw).length>16384||ch.bufferedAmount+raw.length>16384)throw Error('control bound');ch.send(raw);return true;}
+function identity(){return {schema:'h3-rtc-media-v1',session:mediaBinding.session,epoch:mediaBinding.epoch,profile_sha256:mediaBinding.profile_sha256};}
+function stop(){if(stopped)return;stopped=true;clearTimeout(life);clearTimeout(drain);clearTimeout(closeTimer);clearInterval(poll);try{send('stop');}catch{}pc?.close();video.pause();stream.getTracks().forEach(t=>t.stop());pending=[];event('stop');cap='';}
+function finish(partial){if(stopped||ending)return;ending=true;clearTimeout(drain);
+ if(partial&&eos&&pending.length===1&&mediaBinding){const w=pending[0];try{send({...identity(),kind:'end-partial',index:w.index,video_frame_stop:Math.min(frames,frameTail),audio_sample_stop:Math.min(samples,sampleTail)});}catch{}}
+ status.textContent=partial?'Stopped/closing tail unverified.':'Candidate receiver progress complete; not exact PCM or audibility proof.';
+ // No invented media. Let the final reliable control message leave before close.
+ closeTimer=setTimeout(stop,1000);
+}
+function fail(){event('error');status.textContent='Receiver error (details suppressed).';finish(true);}
+function progress(){if(stopped||ending||!mediaBinding||!anchor||video.paused)return;
+ // One origin for the entire combined MediaStream, never a per-window reset.
+ // This is explicitly HTML renderer progress, not decoded source-byte equality.
+ samples=Math.max(samples,Math.floor(Math.max(0,video.currentTime-anchor.current)*48000));
+ while(pending.length&&frames>=pending[0].frame_stop&&samples>=pending[0].sample_stop){const w=pending.shift();send({...identity(),kind:'sink-accepted',index:w.index,video_frame_stop:Math.min(frames,frameTail),audio_sample_stop:Math.min(samples,sampleTail)});}
+ if(eos&&!pending.length)finish(false);
+ else if(eos&&pending.length===1&&frames>=pending[0].frame_start&&performance.now()-lastPresentedAt>3000)finish(true);
+}
+function presented(now,m){if(stopped)return;lastPresentedAt=performance.now();if(!frameEvent){frameEvent=true;event('frame-presented');}
+ if(anchor===null)anchor={media:m.mediaTime,current:video.currentTime,frames:m.presentedFrames};
+ const timeCount=Math.floor(Math.max(0,m.mediaTime-anchor.media)*24+0.001)+1;
+ const actualCount=m.presentedFrames-anchor.frames+1;
+ frames=Math.max(frames,Math.min(timeCount,actualCount));
+ try{progress();}catch{fail();}video.requestVideoFrameCallback(presented);
+}
+function metadata(raw){if(typeof raw!=='string'||raw.length>8192)throw Error('message');const w=JSON.parse(raw);
+ if(!mediaBinding||w.schema!=='h3-rtc-media-v1'||w.session!==mediaBinding.session||w.epoch!==mediaBinding.epoch||w.profile_sha256!==mediaBinding.profile_sha256)throw Error('binding');
+ if(w.kind==='source_eos'){if(eos||next===0||w.index!==next-1||w.video_frame_stop!==frameTail||w.audio_sample_stop!==sampleTail)throw Error('eos');eos=true;progress();return;}
+ if(w.kind!=='window'||eos||pending.length>=2||w.index!==next||w.frame_start!==frameTail||w.sample_start!==sampleTail||w.fps!==24||w.sample_rate!==48000||typeof w.final!=='boolean')throw Error('order');
+ for(const k of ['index','frame_start','frame_stop','sample_start','sample_stop'])if(!Number.isSafeInteger(w[k])||w[k]<0)throw Error('range');
+ if(w.index>=mediaBinding.max_segments||w.frame_stop>mediaBinding.max_total_frames||w.frame_stop<=w.frame_start||w.frame_stop-w.frame_start>124||w.sample_start!==w.frame_start*2000||w.sample_stop!==w.frame_stop*2000)throw Error('clock');
+ pending.push(w);next++;frameTail=w.frame_stop;sampleTail=w.sample_stop;progress();
+}
+document.querySelector('#connect').onclick=async()=>{if(started)return;started=true;event('opened');try{
+ if(!video.requestVideoFrameCallback)throw Error('presentation API');config=await api('/config');mediaBinding=config.media_binding;
+ const remaining=config.binding.expires_at*1000-Date.now();if(!(remaining>0&&remaining<=1800000))throw Error('expiry');life=setTimeout(()=>finish(true),remaining);
+ pc=new RTCPeerConnection({iceServers:config.iceServers});
+ for(const kind of ['audio','video']){const t=pc.addTransceiver(kind,{direction:'recvonly'});const codecs=RTCRtpReceiver.getCapabilities(kind).codecs.filter(c=>c.mimeType.toLowerCase()===(kind==='audio'?'audio/opus':'video/h264'));if(!codecs.length)throw Error('codec');t.setCodecPreferences(codecs);}
+ ch=pc.createDataChannel('control',{ordered:true});ch.onopen=()=>{try{send('start');}catch{fail();}};ch.onmessage=e=>{try{if(e.data!=='started')metadata(e.data);}catch{fail();}};
+ pc.ondatachannel=e=>{e.channel.close();fail();};
+ pc.ontrack=e=>{if(stream.getTracks().some(t=>t.kind===e.track.kind))return fail();stream.addTrack(e.track);video.play().catch(fail);};
+ pc.onconnectionstatechange=()=>{if(pc.connectionState==='connected')event('connected');if(['failed','disconnected'].includes(pc.connectionState)&&!ending)fail();};
+ video.requestVideoFrameCallback(presented);poll=setInterval(()=>{try{progress();}catch{fail();}},50);
+ await pc.setLocalDescription(await pc.createOffer());
+ await new Promise((resolve,reject)=>{if(pc.iceGatheringState==='complete')return resolve();const timer=setTimeout(()=>reject(Error('gather')),10000);pc.onicegatheringstatechange=()=>{if(pc.iceGatheringState==='complete'){clearTimeout(timer);resolve();}};});
+ const a=await api('/offer',{session:config.binding.session,boot:config.binding.boot,description:{type:pc.localDescription.type,sdp:pc.localDescription.sdp}});
+ if(a.session!==config.binding.session||a.boot!==config.binding.boot)throw Error('answer');await pc.setRemoteDescription(a.description);
+ status.textContent='RTC candidate; muted until explicit audio enable. Receiver progress is not original PCM verification.';
+ }catch{fail();}};
+document.querySelector('#unmute').onclick=()=>{if(!stopped){video.muted=false;event('unmuted');video.play().catch(fail);}};
+document.querySelector('#stop').onclick=()=>finish(true);
+window.addEventListener('pagehide',()=>{pc?.close();cap='';});
+</script>

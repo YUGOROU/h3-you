@@ -1,0 +1,19 @@
+{
+  "providers": {
+    "h3-hf-cerebras": {
+      "baseUrl": "https://router.huggingface.co/v1",
+      "api": "openai-completions",
+      "apiKey": "$HF_TOKEN",
+      "models": [{
+        "id": "Qwen/Qwen3.8-27B:cerebras",
+        "name": "H3 director / Qwen3.8-27B via HF Cerebras",
+        "reasoning": false,
+        "samplingParams": {"reasoning_effort": "none"},
+        "input": ["text"],
+        "contextWindow": 65536,
+        "maxTokens": 1024,
+        "cost": {"input": 0.99, "output": 1.49, "cacheRead": 0.99, "cacheWrite": 0.99}
+      }]
+    }
+  }
+}

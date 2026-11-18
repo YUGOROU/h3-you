@@ -1,0 +1,82 @@
+# Production short-training plan: all 489 clips eligible, 120 updates (~0.245 epoch).
+# Pinned MiniMax-H3-Trainer 7a1563a267a17da898df3396acbd6a9d24fcb142.
+# Single H200 ($5/hr), hard job timeout 8h ($40 maximum for this job).
+# Personalized Ref2VA serving adapter compatibility remains unverified.
+model:
+  model_path: ${H3_MODEL_PATH}
+  variant: ref2va
+  training_mode: lora
+  load_checkpoint: null
+lora:
+  rank: 16
+  alpha: 16
+  dropout: 0.0
+  target_modules: [to_q, to_k, to_v, to_out.0]
+training_strategy:
+  name: flexible
+  video:
+    is_generated: true
+    latents_dir: latents
+    conditions:
+      - type: reference
+        modality: image
+        latents_dir: reference_latents
+        probability: 1.0
+  audio:
+    is_generated: false  # Driving target audio stays clean; no audio-generation loss.
+    latents_dir: audio_latents
+    conditions: []
+optimization:
+  learning_rate: 0.0001
+  steps: 120
+  batch_size: 1
+  gradient_accumulation_steps: 1
+  max_grad_norm: 1.0
+  optimizer_type: adamw
+  scheduler_type: linear
+  warmup_steps: 5
+  enable_gradient_checkpointing: true
+  max_seq_tokens: 70000
+acceleration:
+  strategy: ddp
+  mixed_precision_mode: bf16
+  quantization: none
+  offload_optimizer_during_validation: false
+data:
+  preprocessed_data_root: ${H3_CACHE_PATH}
+  num_dataloader_workers: 0
+  val_split_every: 0  # No misleading clip-level validation on adjacent footage.
+  shuffle: true
+validation:
+  samples: []
+  video_dims: [768, 1344, 124]
+  frame_rate: 24.0
+  seed: 42
+  inference_steps: 30
+  interval: 1000
+  sample_media: false
+  loss_sigmas: [0.3, 0.6, 0.9]
+  max_loss_samples: 2
+  skip_initial_validation: true
+checkpoints:
+  interval: 10
+  keep_last_n: 20
+  precision: bfloat16
+  save_training_state: full
+flow_matching:
+  timestep_sampling_mode: uniform
+  timestep_sampling_params: {}
+  video_shift: 12.0
+  audio_shift: 3.0
+hub:
+  push_to_hub: false
+  hub_model_id: null
+wandb:
+  enabled: false
+  project: h3-personal-private
+  entity: null
+  name: null
+  tags: [ref2va, audio-lock, personal]
+  log_validation_videos: false
+seed: 42
+output_dir: ${H3_RUN_PATH}

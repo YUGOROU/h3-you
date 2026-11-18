@@ -1,0 +1,61 @@
+name: H3Camera
+options:
+  bundleIdPrefix: local.h3yugo
+  deploymentTarget:
+    iOS: '18.0'
+settings:
+  base:
+    SWIFT_VERSION: '6.0'
+    SWIFT_STRICT_CONCURRENCY: complete
+    TARGETED_DEVICE_FAMILY: '1'
+    CODE_SIGN_STYLE: Automatic
+targets:
+  H3Camera:
+    type: application
+    platform: iOS
+    sources: [H3Camera]
+    configFiles:
+      Debug: Config/Signing.xcconfig
+      Release: Config/Signing.xcconfig
+    info:
+      path: Info.plist
+      properties:
+        CFBundleDisplayName: H3 Camera
+        NSCameraUsageDescription: ChatGPTとの会話中にインカメ映像を端末内へ保存します。
+        NSMicrophoneUsageDescription: 実験モードを選んだ場合だけ、本人の声と環境音を動画に収録します。ChatGPTの会話が中断する可能性があります。
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        UILaunchScreen: {}
+        UIRequiresFullScreen: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(H3_BUNDLE_IDENTIFIER)
+        TARGETED_DEVICE_FAMILY: '1'
+        MARKETING_VERSION: '0.2.1'
+        CURRENT_PROJECT_VERSION: '3'
+  CoreTests:
+    type: bundle.unit-test
+    platform: macOS
+    deploymentTarget: '14.0'
+    sources:
+      - H3Camera/RecordingMetadata.swift
+      - H3Camera/AudioDiagnostics.swift
+      - H3Camera/AudioRouteSettlement.swift
+      - H3Camera/SerialCommands.swift
+      - Tests
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGNING_ALLOWED: NO
+schemes:
+  CoreTests:
+    build:
+      targets:
+        CoreTests: all
+    test:
+      targets: [CoreTests]
+  H3Camera:
+    build:
+      targets:
+        H3Camera: all

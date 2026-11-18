@@ -1,0 +1,3 @@
+// Shared defaults. Optional local overrides survive XcodeGen regeneration.
+H3_BUNDLE_IDENTIFIER = local.h3yugo.H3Camera
+#include? "Signing.local.xcconfig"

@@ -1,0 +1,8 @@
+[project]
+name = "h3-you"
+version = "0.1.0"
+description = "Research prototype for a personalized real-time video conversation with H3"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
+license = { text = "MIT" }

@@ -1,0 +1,36 @@
+# macOS / Xcode
+.DS_Store
+.build/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+*.xcresult
+ios/Config/Signing.local.xcconfig
+
+# Captured and generated media stay out of version control.
+# The only committed clip is the reviewed demo in docs/media/.
+Recordings/
+*.mov
+*.mp4
+*.wav
+!docs/media/h3-you-99s.mp4
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.env
+.env.*
+*.egg-info/
+.uv-cache/
+
+# Weights and private research outputs
+*.safetensors
+*.pt
+*.pth
+private-data/
+private-runs/
+hf_video_results/
+
+# Local experiment runtimes (nested uv .venv)
+research/*/.venv/

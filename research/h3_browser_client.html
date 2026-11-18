@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>H3 local playback</title>
+<style>body{font:16px system-ui;max-width:900px;margin:2rem auto;padding:1rem;background:#171717;color:#eee}video{width:100%;max-height:65vh;background:black}button{padding:.7rem;margin:.4rem}pre{white-space:pre-wrap}</style></head>
+<body><h1>H3 local playback · CPU protocol client</h1><p>Prepare checks browser/output capability, not GPU readiness or AV quality. Play explicitly approves local speaker playback. No capture or routing changes.</p><button id="prepare">Connect / Prepare</button><button id="play" disabled>Play</button><button id="cancel" disabled>Cancel</button><video id="video" playsinline></video><pre id="status" role="status">Not connected</pre>
+<script>
+'use strict';
+// PURE HELPERS BEGIN
+const LIMITS = Object.freeze({playlist:65536, init:8388608, segment:33554432, segments:256, seconds:240, buffer:8});
+function localPath(path) {
+  if (!/^\/(?:index\.m3u8|init\.mp4|seg-[0-9]{3}\.m4s|api\/(?:status|event))$/.test(path)) throw Error('Non-allowlisted path');
+  return path;
+}
+function parseManifest(text) {
+  if (new TextEncoder().encode(text).length > LIMITS.playlist) throw Error('Playlist too large');
+  const lines = text.trim().split(/\r?\n/);
+  if (lines.shift() !== '#EXTM3U') throw Error('Missing EXTM3U');
+  let map=false, event=false, end=false, duration=null, sequence=null, target=null, version=false;
+  const segments=[];
+  for (const line of lines) {
+    if (!line || end) throw Error('Invalid playlist ordering');
+    if (line === '#EXT-X-ENDLIST') { if (duration!==null) throw Error('Missing segment'); end=true; }
+    else if (line === '#EXT-X-MAP:URI="init.mp4"' && !map && !segments.length && duration===null) map=true;
+    else if (line === '#EXT-X-PLAYLIST-TYPE:EVENT' && !event) event=true;
+    else if (/^#EXT-X-VERSION:[67]$/.test(line) && !version) version=true;
+    else if (/^#EXT-X-TARGETDURATION:[1-8]$/.test(line) && target===null) target=Number(line.split(':')[1]);
+    else if (line === '#EXT-X-MEDIA-SEQUENCE:0' && sequence===null) sequence=0;
+    else if (/^#EXTINF:(?:[0-9]+)(?:\.[0-9]+)?,?$/.test(line) && duration===null) {
+      duration=Number(line.slice(8).replace(/,$/,''));
+      if (!(duration>0 && duration<=LIMITS.buffer)) throw Error('Invalid duration');
+    } else if (/^seg-[0-9]{3}\.m4s$/.test(line) && duration!==null && map) {
+      if (line !== `seg-${String(segments.length).padStart(3,'0')}.m4s` || segments.length>=LIMITS.segments) throw Error('Not full ordered history');
+      segments.push({path:localPath('/'+line),duration}); duration=null;
+    } else throw Error('Unsupported playlist entry');
+  }
+  if (!map || !event || sequence!==0 || target===null || !version || duration!==null || segments.some(s=>s.duration>target)) throw Error('Incomplete playlist');
+  return {segments,end};
+}
+function codecFromInit(buffer) {
+  const b=new Uint8Array(buffer), d=new DataView(b.buffer,b.byteOffset,b.byteLength); const configs=[];
+  const containers=new Set(['moov','trak','mdia','minf','stbl']);
+  function walk(start,end,depth) {
+    if(depth>12) throw Error('MP4 nesting');
+    let p=start;
+    while(p<end) {
+      if(p+8>end) throw Error('Truncated box');
+      const size=d.getUint32(p), type=String.fromCharCode(...b.slice(p+4,p+8));
+      if(size<8 || p+size>end) throw Error('Invalid box size');
+      const s=p+8,e=p+size;
+      if(containers.has(type)) walk(s,e,depth+1);
+      else if(type==='stsd') { if(s+8>e || d.getUint32(s+4)!==1) throw Error('Invalid sample description'); walk(s+8,e,depth+1); }
+      else if(type==='avc1') { if(s+78>e) throw Error('Invalid avc1'); walk(s+78,e,depth+1); }
+      else if(type==='avcC') {
+        if(e-s<7 || b[s]!==1 || (b[s+4]&3)!==3 || (b[s+5]&31)!==1) throw Error('Invalid avcC');
+        let q=s+6; const n=d.getUint16(q); q+=2;
+        if(n<4 || q+n>=e || (b[q]&31)!==7) throw Error('Invalid SPS');
+        const bytes=Array.from(b.slice(q+1,q+4));
+        if(bytes.some((v,i)=>v!==b[s+1+i])) throw Error('SPS configuration mismatch');
+        q+=n; if(b[q++]!==1 || q+2>e) throw Error('Invalid PPS');
+        const pn=d.getUint16(q); q+=2;
+        if(pn<1 || q+pn>e || (b[q]&31)!==8) throw Error('Invalid PPS');
+        configs.push('avc1.'+bytes.map(v=>v.toString(16).padStart(2,'0')).join(''));
+      }
+      p=e;
+    }
+  }
+  walk(0,b.length,0);
+  if(configs.length!==1) throw Error('Expected exactly one AVC configuration');
+  return `video/mp4; codecs="${configs[0]}, mp4a.40.2"`;
+}
+function mayEnd(manifest, appended) { return manifest.end && appended===manifest.segments.length; }
+function bufferOperation(sb, signal, operation) {
+  return new Promise((resolve,reject)=>{
+    const clean=()=>{sb.removeEventListener('updateend',ok);sb.removeEventListener('error',bad);signal.removeEventListener('abort',bad);};
+    const ok=()=>{clean();resolve();}; const bad=()=>{clean();reject(Error('Append aborted or failed'));};
+    if(signal.aborted || sb.updating) return bad();
+    sb.addEventListener('updateend',ok,{once:true});sb.addEventListener('error',bad,{once:true});signal.addEventListener('abort',bad,{once:true});
+    try{operation();}catch(e){clean();reject(e);}
+  });
+}
+function appendSerial(sb, data, signal) { return bufferOperation(sb,signal,()=>sb.appendBuffer(data)); }
+function removeSerial(sb, start, end, signal) { return bufferOperation(sb,signal,()=>sb.remove(start,end)); }
+function requireMSE(api) {
+  if(typeof api!=='function' || typeof api.isTypeSupported!=='function') throw Error('MediaSource API unavailable; no fallback.');
+  return api;
+}
+// PURE HELPERS END
+const video=document.getElementById('video'), prepare=document.getElementById('prepare'), play=document.getElementById('play'), cancel=document.getElementById('cancel'), status=document.getElementById('status');
+const events=new Set(['client_ready','first_append','playing','waiting','stalled','ended','failed','cancelled','timeout','output_drift']);
+let controller, started=0, stopped=true, approved=false, ready=false, mse, objectURL;
+let phaseTimer, hardTimer, activeArmed=false, startupArmed=false, reportCount=0, terminalReported=false;
+let queue=Promise.resolve();
+function armPhase(seconds) {
+  clearTimeout(phaseTimer);
+  phaseTimer=setTimeout(()=>{void stop('timeout','Stopped: finite phase limit.');},seconds*1000);
+}
+function report(event) {
+  if(!events.has(event) || stopped) return Promise.resolve();
+  const terminal=['ended','failed','cancelled','timeout','output_drift'].includes(event);
+  if(terminal ? terminalReported || reportCount>=256 : reportCount>=250) return Promise.resolve();
+  if(terminal)terminalReported=true;
+  reportCount++;
+  const body=JSON.stringify({event,elapsed_seconds:Math.max(0,(performance.now()-started)/1000),media_seconds:Number.isFinite(video.currentTime)?video.currentTime:0});
+  return read('/api/event',1024,{method:'POST',headers:{'Content-Type':'application/json'},body}).catch(()=>{});
+}
+function read(path,cap,options={},pending=false) {
+  // A single serialization queue includes headers AND the full response body.
+  localPath(path);
+  const job=queue.then(async()=>{
+    if(controller.signal.aborted) throw Error('Stopped');
+    const r=await fetch(path,{...options,mode:'same-origin',credentials:'omit',redirect:'error',cache:'no-store',signal:controller.signal});
+    if(pending && path==='/index.m3u8' && r.status===404) return null;
+    if(!r.ok) throw Error('HTTP '+r.status);
+    const len=r.headers.get('Content-Length');
+    if(len!==null && (!/^\d+$/.test(len) || Number(len)>cap)) throw Error('Response length rejected');
+    if(!r.body)throw Error('Response stream missing');
+    const reader=r.body.getReader(), chunks=[];let total=0;
+    try {
+      while(true){const part=await reader.read();if(part.done)break;
+        total+=part.value.byteLength;
+        if(total>cap){await reader.cancel();throw Error('Response too large');}
+        chunks.push(part.value);
+      }
+    } finally { reader.releaseLock(); }
+    const data=new Uint8Array(total);let offset=0;
+    for(const chunk of chunks){data.set(chunk,offset);offset+=chunk.byteLength;}
+    return data.buffer;
+  }); queue=job.then(()=>{},()=>{});return job;
+}
+const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+async function stop(event,message) {
+  if(stopped)return;
+  clearTimeout(phaseTimer);clearTimeout(hardTimer);
+  video.pause(); play.disabled=true; cancel.disabled=true; status.textContent=message;
+  const receipt=report(event); stopped=true; ready=false;
+  // Do not allow a hung report to extend the finite session.
+  await Promise.race([receipt,sleep(300)]);controller.abort();
+  video.removeAttribute('src');video.load();if(objectURL)URL.revokeObjectURL(objectURL);
+}
+async function checkOutput() {
+  const data=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(await read('/api/status',65536)));
+  if(!data.output || data.output.default_is_builtin_speaker!==true) { await stop('output_drift','Stopped: default output is not verified built-in speaker.');throw Error('Output drift'); }
+  if(!['waiting','streaming','ended','failed'].includes(data.stream_state)) throw Error('Invalid server state');
+  if(data.stream_state==='failed') throw Error('Server failed');
+  const active=data.max_seconds ?? LIMITS.seconds, startup=data.startup_seconds ?? 0;
+  if(!Number.isFinite(active)||active<=0||active>240||!Number.isFinite(startup)||startup<0||startup>1200)throw Error('Invalid finite allowances');
+  if(data.stream_state==='streaming' && !activeArmed){activeArmed=true;armPhase(active);}
+  else if(data.stream_state==='waiting' && !startupArmed && !activeArmed){startupArmed=true;armPhase(startup||active);}
+  return data;
+}
+prepare.onclick=async()=>{
+  prepare.disabled=true;controller=new AbortController();started=performance.now();stopped=false;cancel.disabled=false;
+  armPhase(1200);
+  hardTimer=setTimeout(()=>{void stop('timeout','Stopped: hard session limit.');},1440000);
+  try {
+    requireMSE(window.MediaSource);
+    await checkOutput();
+    mse=new MediaSource();objectURL=URL.createObjectURL(mse);
+    const opened=new Promise((resolve,reject)=>{mse.addEventListener('sourceopen',resolve,{once:true});controller.signal.addEventListener('abort',()=>reject(Error('Stopped')),{once:true});});
+    video.src=objectURL;await opened;
+    ready=true;play.disabled=false;status.textContent='Prepared: MSE API available. Exact H264/AAC support is checked from init; synthetic preflight is required before GPU.';
+    await report('client_ready');
+    const monitor=(async()=>{while(!stopped){await sleep(1000);if(stopped)break;await checkOutput();}})().catch(e=>stop('failed',e.message));
+    let sb=null, count=0, history=[], completed=false;
+    while(!stopped && !completed) {
+      const playlist=await read('/index.m3u8',LIMITS.playlist,{},true);
+      if(playlist===null){await checkOutput();await sleep(500);continue;}
+      const manifest=parseManifest(new TextDecoder('utf-8',{fatal:true}).decode(playlist));
+      if(manifest.segments.length<history.length || history.some((s,i)=>s.path!==manifest.segments[i].path || s.duration!==manifest.segments[i].duration)) throw Error('Playlist history changed');
+      history=manifest.segments;
+      if(!sb && manifest.segments.length) {
+        const init=await read('/init.mp4',LIMITS.init), codec=codecFromInit(init);
+        if(!MediaSource.isTypeSupported(codec)) throw Error('Exact AVC/AAC codec unsupported; no fallback.');
+        sb=mse.addSourceBuffer(codec);await appendSerial(sb,init,controller.signal);await report('first_append');
+      }
+      while(!stopped && count<manifest.segments.length) {
+        const duration=manifest.segments[count].duration;
+        const ahead=()=>sb.buffered.length ? Math.max(0,sb.buffered.end(sb.buffered.length-1)-video.currentTime):0;
+        while(!stopped && ahead()+duration>LIMITS.buffer) await sleep(100);
+        if(stopped)break;
+        // Reclaim consumed data without seeking, resetting timestamps, or altering PCM.
+        if(video.currentTime>8 && sb.buffered.length && sb.buffered.start(0)<video.currentTime-4) {
+          await removeSerial(sb,0,video.currentTime-4,controller.signal);
+        }
+        const segment=await read(manifest.segments[count].path,LIMITS.segment);
+        await appendSerial(sb,segment,controller.signal);count++;
+        if(ahead()>LIMITS.buffer+0.05) throw Error('Buffered time exceeded declared bound');
+      }
+      if(!stopped && sb && mayEnd(manifest,count)) {mse.endOfStream();completed=true;status.textContent='All declared segments appended; awaiting actual playback end.';}
+      if(!completed)await sleep(500);
+    }
+    await monitor;
+  } catch(e) {if(!stopped)await stop('failed',String(e.message));}
+  finally{clearTimeout(phaseTimer);clearTimeout(hardTimer);}
+};
+play.onclick=async()=>{if(!ready || stopped)return;try{await checkOutput();if(stopped)return;approved=true;await video.play();}catch(e){await stop('failed',e.message);}};
+cancel.onclick=()=>{void stop('cancelled','Cancelled.');};
+for(const event of ['playing','waiting','stalled'])video.addEventListener(event,()=>{if(!stopped){status.textContent=event==='playing'?'Playing (not a quality acceptance).':event+' — playback not complete.';void report(event);}});
+video.addEventListener('ended',()=>{if(!stopped && approved && mse.readyState==='ended')void stop('ended','Playback ended. This is not GPU/AV quality acceptance.');});
+video.addEventListener('error',()=>{if(!stopped)void stop('failed','Media playback error; no fallback.');});
+</script></body></html>

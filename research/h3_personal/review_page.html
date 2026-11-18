@@ -1,0 +1,86 @@
+<!doctype html><html lang="ja"><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>H3画像選別・承認</title>
+<style>
+body{background:#17191d;color:#eee;font:16px system-ui;margin:20px}a{color:#a9ceff}button,select,input{font:inherit;padding:9px;margin:4px;background:#303641;color:white;border:1px solid #69717c;border-radius:6px}button:disabled{opacity:.4}.tabs{display:flex;gap:20px;flex-wrap:wrap}.keys{color:#c5d0de}#result{background:#263347;padding:15px;border-radius:9px;font-size:20px}#strip{max-width:100%;cursor:zoom-in}#strip.zoom{max-width:none;width:1600px}#box{overflow:auto;max-height:65vh}#status{color:#9fd}#error{color:#ffa5a5}#meta{overflow-wrap:anywhere}#details{color:#bbc;overflow-wrap:anywhere}p{margin:10px 0}input{width:70px}
+</style>
+<h1 id="title">H3画像選別</h1>
+<nav class="tabs"><a id="teacher-link" href="/?view=teacher">追加教師</a><a href="/?view=approval">初期自動分類327件の承認</a><a href="/?view=all">全候補</a></nav>
+<p class="keys">← 前へ ／ → 次へ（移動のみ・保存しない） ／ ↑ 顔優先 ／ ↓ 除外 ／ M 自然動作 ／ H 保留 ／ Z 直前取消</p>
+<p id="help"></p>
+<p>音声安定性：ユーザー視聴で確認済み。ここでは画像のみ確認。画像クリックでプレビュー原寸（原本解像度ではありません）。時点間の遮蔽・ブレは保証しません。</p>
+<label>対象 <select id="filter"><option id="teacher-option" value="calibration">追加教師（指定キュー）</option><option value="initial">初期自動分類327件・全件</option><option value="uncertain">CPU判定：保留</option><option value="proposals">CPU自動提案</option><option value="review">初期：要確認813件</option><option value="all">全候補1140件</option><option value="identity">初期：顔優先</option><option value="motion">初期：自然動作</option></select></label>
+<label>セッション <select id="session"><option value="all">全セッション</option></select></label>
+<button id="first">先頭へ</button><button id="resume">未承認へ</button>
+<label>番号 <input id="number" type="number" min="1" value="1"></label><button id="jump">移動</button><button id="refs">写真を表示／隠す</button>
+<p id="status"></p><div id="result"></div><p id="meta"></p><p id="details"></p><p id="error" role="alert"></p>
+<div id="box"><img id="strip" alt="複数時点のカラー画像"></div>
+<div><button id="prev">← 前へ</button><button id="next">→ 次へ</button><button id="approve">Enter 初期分類を承認</button><button data-label="identity">↑ 顔優先</button><button data-label="motion">M 自然動作</button><button data-label="reject">↓ 除外</button><button data-label="hold">H 保留</button><button id="undo">Z 取消</button></div>
+<div id="reference" hidden></div>
+<script>
+const token=__TOKEN__;
+let data,queue=[],pos=0,busy=false,imageReady=false,history=[],generation=0;
+const $=id=>document.getElementById(id);
+const names={identity:'顔優先',motion:'自然動作',reject:'除外',hold:'保留',review:'要確認'};
+const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function initialMode(){return $('filter').value==='initial';}
+function setBusy(value){busy=value;document.querySelectorAll('button,select,input').forEach(e=>e.disabled=value);}
+function updateButtons(){if(busy)return;const ready=imageReady&&queue.length>0;document.querySelectorAll('[data-label]').forEach(b=>b.disabled=!ready);$('approve').disabled=!ready||!initialMode();$('prev').disabled=!queue.length||pos===0;$('next').disabled=!queue.length||pos===queue.length-1;}
+function rebuild(resume=false){
+ const f=$('filter').value,s=$('session').value;
+ queue=data.candidates.filter(c=>
+  (s==='all'||c.session_id===s)&&
+  (f==='all'||f==='calibration'&&data.calibration_ids.includes(c.id)||f==='initial'&&data.initial_ids.includes(c.id)||
+   f==='uncertain'&&data.proposals[c.id]?.needs_review||f==='proposals'&&data.proposals[c.id]?.decision==='auto_proposal'||c.pool===f));
+ if(f==='calibration'){const order=new Map(data.calibration_ids.map((id,i)=>[id,i]));queue.sort((a,b)=>order.get(a.id)-order.get(b.id));}
+ pos=0;if(resume){const index=queue.findIndex(c=>!data.labels[c.id]||data.labels[c.id].label==='hold');if(index>=0)pos=index;}
+ $('title').textContent=initialMode()?'初期自動分類327件：人手承認':'画像品質：教師アノテーション';
+ $('help').textContent=initialMode()?'左右キーで承認済みを含む全件を閲覧できます。Enterで表示中の初期分類を承認。違う場合は↑/↓/Mで訂正。閲覧だけでは承認されません。':`追加教師${data.calibration_ids.length}件は↑/↓/Mで分類してください。左右キーは移動だけです。Hは明示的な保留。判断保存後は次へ進みます。`;
+ show();
+}
+function show(){
+ imageReady=false;const gen=++generation,c=queue[pos];$('error').textContent='';$('number').value=queue.length?pos+1:0;$('number').max=queue.length;
+ const counts={identity:0,motion:0,reject:0,hold:0};Object.values(data.labels).forEach(l=>counts[l.label]++);
+ const complete=queue.filter(c=>data.labels[c.id]&&data.labels[c.id].label!=='hold').length;
+ $('status').textContent=`${queue.length?pos+1:0} / ${queue.length} ｜ この対象の判断済み ${complete} / ${queue.length} ｜ 全体：顔 ${counts.identity}・動作 ${counts.motion}・除外 ${counts.reject}・保留 ${counts.hold}`;
+ if(!c){$('result').textContent='該当候補なし';$('meta').textContent='';$('details').textContent='';$('strip').removeAttribute('src');updateButtons();return;}
+ const l=data.labels[c.id],p=data.proposals[c.id];
+ $('result').textContent=`初期自動分類：${names[c.pool]||c.pool}　｜　あなたの判断：${l?names[l.label]:'未承認'}`;
+ $('meta').textContent=`${c.id} ｜ ${c.start_seconds.toFixed(2)}–${c.end_seconds.toFixed(2)}秒`;
+ $('details').textContent=`初期proxy score ${c.score} / ${(c.reasons||[]).join(', ')||'proxy上問題なし'}${p?' ｜ CPU提案：'+(names[p.suggested_label]||'保留')+' / vote '+(p.vote_score?.toFixed(2)||'—')+'（正答確率ではない） / '+p.reasons.join(', '):''}`;
+ // Fresh image node prevents a previous request's load/error from enabling a new item's classification.
+ const image=document.createElement('img');image.id='strip';image.alt='複数時点のカラー画像';image.onclick=()=>image.classList.toggle('zoom');
+ image.onload=()=>{if(gen===generation){imageReady=true;updateButtons();}};
+ image.onerror=()=>{if(gen===generation){imageReady=false;$('error').textContent='画像の生成に失敗。判断は保存されていません。';updateButtons();}};
+ $('strip').replaceWith(image);image.src='/frame/'+encodeURIComponent(c.id);updateButtons();
+}
+function navigate(step){if(busy||!queue.length)return;pos=Math.min(queue.length-1,Math.max(0,pos+step));show();}
+async function save(id,label){const res=await fetch('/label',{method:'POST',headers:{'Content-Type':'application/json','X-Review-Token':token},body:JSON.stringify({id,label})});if(!res.ok)throw Error(await res.text());data.labels=(await res.json()).labels;}
+async function annotate(label){
+ if(busy||!queue.length)return;if(!imageReady){$('error').textContent='画像が読み込まれるまでお待ちください。';return;}
+ const c=queue[pos],prior=data.labels[c.id]?.label||null;setBusy(true);
+ try{await save(c.id,label);history.push({id:c.id,prior});if(pos<queue.length-1){pos++;show();}else{show();$('status').textContent+=' ｜ 最後の候補を保存しました';}}
+ catch(e){$('error').textContent='保存失敗。次へ進めていません：'+e.message;}
+ finally{setBusy(false);updateButtons();}
+}
+function approve(){if(busy||!initialMode()||!queue.length||!imageReady)return;const c=queue[pos],prior=data.labels[c.id]?.label;if(prior&&prior!=='hold'&&prior!==c.pool&&!confirm('既存の判断「'+names[prior]+'」を初期分類「'+names[c.pool]+'」へ変更しますか？'))return;annotate(c.pool);}
+async function undo(){if(busy||!history.length)return;const h=history[history.length-1];setBusy(true);try{await save(h.id,h.prior);history.pop();const i=queue.findIndex(c=>c.id===h.id);if(i>=0)pos=i;show();}catch(e){$('error').textContent=e.message;}finally{setBusy(false);updateButtons();}}
+document.querySelectorAll('[data-label]').forEach(b=>b.onclick=()=>annotate(b.dataset.label));
+$('prev').onclick=()=>navigate(-1);$('next').onclick=()=>navigate(1);$('approve').onclick=approve;$('undo').onclick=undo;
+$('first').onclick=()=>{if(!busy){pos=0;show();}};$('resume').onclick=()=>{if(!busy)rebuild(true);};
+$('jump').onclick=()=>{if(!busy&&queue.length){pos=Math.min(queue.length-1,Math.max(0,(parseInt($('number').value,10)||1)-1));show();}};
+$('filter').onchange=()=>{if(!busy)rebuild(false);};$('session').onchange=()=>{if(!busy)rebuild(false);};$('refs').onclick=()=>$('reference').hidden=!$('reference').hidden;
+document.addEventListener('keydown',e=>{
+ if(['INPUT','SELECT','TEXTAREA'].includes(e.target.tagName)||e.ctrlKey||e.metaKey||e.altKey||e.repeat)return;
+ if(['ArrowUp','ArrowDown','ArrowRight','ArrowLeft','Enter','m','M','h','H','z','Z'].includes(e.key))e.preventDefault();
+ if(e.key==='ArrowUp')annotate('identity');if(e.key==='ArrowDown')annotate('reject');if(e.key==='ArrowRight')navigate(1);if(e.key==='ArrowLeft')navigate(-1);
+ if(e.key==='Enter')approve();if(e.key==='m'||e.key==='M')annotate('motion');if(e.key==='h'||e.key==='H')annotate('hold');if(e.key==='z'||e.key==='Z')undo();
+});
+(async()=>{try{
+ const res=await fetch('/data');if(!res.ok)throw Error('data load');data=await res.json();
+ for(const s of [...new Set(data.candidates.map(c=>c.session_id))]){const o=document.createElement('option');o.value=s;o.textContent=s;$('session').append(o);}
+ $('teacher-link').textContent=`追加教師${data.calibration_ids.length}件`;$('teacher-option').textContent=`追加教師${data.calibration_ids.length}件`;
+ const view=new URLSearchParams(location.search).get('view');$('filter').value=view==='approval'?'initial':view==='all'?'all':'calibration';
+ $('reference').innerHTML=data.references.map((r,i)=>`<p>${esc(r)}</p><img style="max-width:300px" src="/reference/${i}">`).join('');
+ rebuild(view!=='approval'&&view!=='all');
+}catch(e){$('error').textContent=e.message;}})();
+</script></html>
